@@ -1,0 +1,76 @@
+# Build the module against one kernel.org tree: a full kernel build, so
+# that modpost can check that every symbol the module uses is exported, and
+# in which namespace.
+name: Kernel build
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "A tag, or mainline, linux-next or latest-release"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ inputs.ref }}
+    # gcc 13: the v6.8 tag does not build with gcc 15.
+    runs-on: ubuntu-24.04
+    continue-on-error: ${{ inputs.ref == 'linux-next' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Fetch the kernel
+        id: fetch
+        run: |
+          ref="${{ inputs.ref }}"
+          case "$ref" in
+          mainline)
+            git clone -q --depth 1 https://github.com/torvalds/linux.git linux ;;
+          linux-next)
+            git clone -q --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git linux ;;
+          latest-release)
+            ref=$(git ls-remote --tags --refs https://github.com/torvalds/linux.git 'v*' |
+                  sed -n 's|.*refs/tags/\(v[0-9]*\.[0-9]*\)$|\1|p' | sort -V | tail -1)
+            git clone -q --depth 1 --branch "$ref" https://github.com/torvalds/linux.git linux
+            # The weekly run builds a release only in the week it comes out.
+            age=$(( $(date +%s) - $(git -C linux log -1 --format=%ct) ))
+            if [ "${{ github.event_name }}" = schedule ] && [ "$age" -gt $((8 * 86400)) ]; then
+              echo "$ref came out $((age / 86400)) days ago and was built then; skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi ;;
+          *)
+            git clone -q --depth 1 --branch "$ref" https://github.com/torvalds/linux.git linux ;;
+          esac
+          echo "Kernel $(make -C linux -s kernelversion) ($ref)"
+      - name: Look for an in-tree driver
+        if: steps.fetch.outputs.skip != 'true'
+        run: |
+          if grep -q "config SERIAL_8250_ASPEED_PCI" linux/drivers/tty/serial/8250/Kconfig; then
+            echo "::warning::${{ inputs.ref }} has CONFIG_SERIAL_8250_ASPEED_PCI: the driver is in-tree"
+          fi
+          if hits=$(grep -rlE "(ASPEED|0x1a03)[^)]*0x2402" linux/drivers --include="*.c"); then
+            echo "::warning::${{ inputs.ref }}: a driver matches 1a03:2402: $(echo $hits)"
+          fi
+      - name: Install build dependencies
+        if: steps.fetch.outputs.skip != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends bc bison flex libelf-dev libssl-dev
+      - name: Build the kernel
+        if: steps.fetch.outputs.skip != 'true'
+        run: |
+          make -C linux -s x86_64_defconfig
+          make -C linux -s -j"$(nproc)"
+          grep -q serial8250_pci_setup_port linux/Module.symvers
+      - name: Build the module
+        if: steps.fetch.outputs.skip != 'true'
+        run: |
+          make -C linux M="$PWD/dkms" W=1 modules 2>&1 | tee build.log
+          test -e dkms/8250_aspeed_pci.ko
+          # Any compiler or modpost warning fails the job.
+          if grep -iE "warning|error" build.log; then
+            exit 1
+          fi

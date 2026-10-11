@@ -1,0 +1,98 @@
+# Build the module against the supported distributions' kernels and against
+# kernel.org trees, every week and on every change. The weekly run catches
+# kernel API changes, and reports when a kernel gets a driver of its own for
+# the device.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: shellcheck -x install.sh uninstall.sh files/aspeed-sol-status files/aspeed-bmc-kcs-args dev/build-matrix.sh
+
+  # What users get: dkms build against the distribution's own headers.
+  dkms:
+    name: dkms (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: debian-13, image: "debian:trixie", headers: linux-headers-amd64 }
+          - { name: proxmox-9, image: "debian:trixie", headers: proxmox-default-headers, proxmox: true }
+          - { name: ubuntu-24.04, image: "ubuntu:24.04", headers: linux-headers-generic }
+          - { name: ubuntu-24.04-hwe, image: "ubuntu:24.04", headers: linux-headers-generic-hwe-24.04 }
+          - { name: ubuntu-26.04, image: "ubuntu:26.04", headers: linux-headers-generic }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Add the Proxmox VE repository
+        if: matrix.proxmox
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates curl
+          curl -fsSL -o /usr/share/keyrings/proxmox-archive-keyring.gpg \
+            https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg
+          cat > /etc/apt/sources.list.d/pve.sources <<'SRC'
+          Types: deb
+          URIs: http://download.proxmox.com/debian/pve
+          Suites: trixie
+          Components: pve-no-subscription
+          Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+          SRC
+      # libelf for objtool: proxmox-headers does not depend on it, since every
+      # Proxmox host has it (through systemd), but this container does not.
+      - name: Install dkms and headers
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends dkms make gcc libc6-dev ${{ matrix.headers }} libelf1t64
+      - name: dkms build
+        run: |
+          . dkms/dkms.conf
+          cp -r dkms "/usr/src/$PACKAGE_NAME-$PACKAGE_VERSION"
+          dkms add "$PACKAGE_NAME/$PACKAGE_VERSION"
+          fail=0
+          for k in $(ls /lib/modules); do
+            [ -e "/lib/modules/$k/build/Makefile" ] || continue
+            echo "::group::$k"
+            rc=0
+            dkms build "$PACKAGE_NAME/$PACKAGE_VERSION" -k "$k" || rc=$?
+            echo "::endgroup::"
+            case $rc in
+            0) echo "built for $k" ;;
+            77) echo "::warning::$k: dkms skipped the build; check whether this kernel has its own driver (CONFIG_SERIAL_8250_ASPEED_PCI)" ;;
+            *) echo "::error::$k: dkms build failed (rc=$rc)"
+               cat "/var/lib/dkms/$PACKAGE_NAME/$PACKAGE_VERSION/build/make.log" 2>/dev/null || true
+               fail=1 ;;
+            esac
+          done
+          ls /lib/modules | grep -q . || { echo "::error::no kernel headers installed"; exit 1; }
+          exit $fail
+
+  # Early warning: mainline and linux-next every week, and the newest
+  # release in the week it comes out. Older releases are in compat.yml.
+  kernel:
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [mainline, linux-next, latest-release]
+    uses: ./.github/workflows/kernel-build.yml
+    with:
+      ref: ${{ matrix.ref }}

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Installed by aspeed-pci-vuart-dkms (--kcs-fix).
+#
+# Print ipmi_si options for the KCS interface at BAR1 + 0xe88 of the ASPEED
+# BMC device (1a03:2402), where the ASUS ASMB10-iKVM firmware puts it.
+# Prints nothing, which leaves ipmi_si to ACPI, if the device is not found.
+for d in /sys/bus/pci/devices/*; do
+	if [ "$(cat "$d/vendor")" != 0x1a03 ] || [ "$(cat "$d/device")" != 0x2402 ]; then
+		continue
+	fi
+	bar1=$(sed -n 2p "$d/resource" | cut -d" " -f1)
+	[ -n "$bar1" ] && [ $((bar1)) -ne 0 ] || exit 0
+	printf "tryacpi=0 trydmi=0 tryplatform=0 type=kcs addrs=0x%x regspacings=4 regsizes=1\n" $((bar1 + 0xe88))
+	exit 0
+done

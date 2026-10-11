@@ -1,0 +1,25 @@
+# Build the module against the older releases it supports. These kernels do
+# not change, so this runs only when the driver or its compatibility header
+# does (or by hand, from the Actions tab).
+name: Compat
+
+on:
+  push:
+    branches: [main]
+    paths: ["dkms/**", ".github/workflows/compat.yml", ".github/workflows/kernel-build.yml"]
+  pull_request:
+    paths: ["dkms/**", ".github/workflows/compat.yml", ".github/workflows/kernel-build.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [v6.8, v6.12, v6.17, v6.19, v7.0]
+    uses: ./.github/workflows/kernel-build.yml
+    with:
+      ref: ${{ matrix.ref }}

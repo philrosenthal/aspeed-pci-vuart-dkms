@@ -1,0 +1,196 @@
+#!/bin/bash
+# Installed by aspeed-pci-vuart-dkms.
+#
+# Show whether the ASPEED BMC serial ports (SOL) and KCS are set up, and why
+# not if they are not. Read-only; run as root for the full picture.
+
+PKG=aspeed-pci-8250
+MOD=8250_aspeed_pci
+
+if [ -t 1 ]; then
+	ok=$'\e[32mok\e[0m' warn=$'\e[33m!!\e[0m' bad=$'\e[31mXX\e[0m'
+else
+	ok=ok warn='!!' bad=XX
+fi
+problems=0
+say() { printf ' %s  %s\n' "$1" "$2"; }
+fail() { say "$bad" "$1"; problems=$((problems + 1)); }
+
+# The certificate DKMS signs modules with: mok_certificate if configured,
+# otherwise the distribution's default (Ubuntu patches DKMS to use shim-signed's).
+dkms_cert() {
+	local c
+	c=$(sed -n 's/^ *mok_certificate=["'\'']\{0,1\}\([^"'\'']*\).*/\1/p' \
+		/etc/dkms/framework.conf /etc/dkms/framework.conf.d/*.conf 2>/dev/null | tail -1)
+	[ -n "$c" ] && { echo "$c"; return 0; }
+	. /etc/os-release
+	if [ "$ID" = ubuntu ]; then
+		echo /var/lib/shim-signed/mok/MOK.der
+	else
+		echo /var/lib/dkms/mok.pub
+	fi
+}
+
+find_device() {
+	local d
+	for d in /sys/bus/pci/devices/*; do
+		[ "$(cat "$d/vendor")" = 0x1a03 ] &&
+			[ "$(cat "$d/device")" = 0x2402 ] && { echo "$d"; return; }
+	done
+}
+
+echo "ASPEED BMC serial (SOL) status"
+echo
+
+dev=$(find_device)
+if [ -z "$dev" ]; then
+	fail "No ASPEED BMC PCIe device (1a03:2402) found; this package does nothing here"
+	exit 1
+fi
+bdf=${dev##*/}
+class=$(cat "$dev/class")
+say "$ok" "Device $bdf, class $class, revision $(cat "$dev/revision")"
+[ "$class" = 0x0c0701 ] ||
+	say "$warn" "Class is not 0x0c0701 (KCS): the BMC firmware set the device up for another driver"
+
+drv=$(basename "$(readlink -f "$dev/driver" 2>/dev/null)" 2>/dev/null)
+case "$drv" in
+"$MOD")	say "$ok" "Bound to $MOD" ;;
+ipmi_si)
+	fail "Bound to ipmi_si, which cannot use it; is 'options ipmi_si trypci=0' in /etc/modprobe.d?" ;;
+"")	fail "No driver bound (module not loaded, or no serial port enabled by the BMC)" ;;
+*)	say "$warn" "Bound to $drv" ;;
+esac
+
+# Drivers of the running kernel itself (not DKMS, not ipmi_si, which cannot
+# use the device) that match it: "name (built in)" or "name (module)".
+intree_drivers() {
+	local k pat mod how path
+	k=$(uname -r)
+	{
+		awk '$1 == "alias" { print $2, $3, "module" }' "/lib/modules/$k/modules.alias" 2>/dev/null
+		tr '\0' '\n' <"/lib/modules/$k/modules.builtin.modinfo" 2>/dev/null |
+			sed -n 's/^\([^.]*\)\.alias=\(pci:.*\)/\2 \1 builtin/p'
+	} | while read -r pat mod how; do
+		[ "$mod" = ipmi_si ] && continue
+		# shellcheck disable=SC2053 # the alias is a glob pattern
+		[[ $modalias == $pat ]] || continue
+		if [ "$how" = builtin ]; then
+			echo "$mod (built in)"
+		else
+			path=$(modinfo -k "$k" -n "$mod" 2>/dev/null)
+			case "$path" in
+			*/updates/*) ;;
+			*) echo "$mod (module)" ;;
+			esac
+		fi
+	done
+	# A module of the same name as this package's is hidden from
+	# modules.alias by the DKMS copy in updates/.
+	if [ -n "$(find "/lib/modules/$k/kernel" -name "$MOD.ko*" -print -quit 2>/dev/null)" ]; then
+		echo "$MOD (module)"
+	fi
+}
+
+modalias=$(cat "$dev/modalias")
+intree=$(intree_drivers | sort -u | paste -sd, - | sed 's/,/, /g')
+if [ -n "$intree" ]; then
+	say "$warn" "Kernel $(uname -r) has its own driver for this device: $intree."
+	say "  " "This package is no longer needed with it: run aspeed-sol-uninstall --keep-console"
+	say "  " "(if the driver's name is not $MOD, also put that name in /etc/initramfs-tools/modules)."
+fi
+
+if command -v dkms >/dev/null; then
+	st=$(dkms status "$PKG" 2>/dev/null)
+	if [ -z "$st" ]; then
+		[ -n "$intree" ] || say "$warn" "DKMS package $PKG not registered"
+	else
+		while read -r line; do say " -" "dkms: $line"; done <<<"$st"
+		# Lines look like "aspeed-pci-8250/2.1, 7.0.14-23-pve, x86_64: installed"
+		# (DKMS 2.x: "aspeed-pci-8250, 2.1, 7.0.14-23-pve, x86_64: installed").
+		built=$(awk -F', ' -v k="$(uname -r)" '
+			$NF ~ /: installed/ { for (i = 1; i < NF; i++) if ($i == k) print }' <<<"$st")
+		if [ -z "$built" ] && [ -z "$intree" ]; then
+			fail "Not built for the running kernel $(uname -r) (kernel headers installed?)"
+		fi
+	fi
+fi
+
+if [ -r "/sys/module/${MOD}/srcversion" ]; then
+	signer=$(modinfo -F signer $MOD 2>/dev/null)
+	if [ "$(cat "/sys/module/${MOD}/srcversion")" = "$(modinfo -F srcversion $MOD 2>/dev/null)" ]; then
+		say "$ok" "Module loaded from $(modinfo -n $MOD 2>/dev/null)${signer:+, signed by \"$signer\"}"
+	else
+		say "$warn" "The loaded module is an older build than $(modinfo -n $MOD 2>/dev/null); reboot to use the new one"
+	fi
+fi
+
+ttys=()
+for t in /sys/class/tty/ttyS*; do
+	case "$(readlink -f "$t/device" 2>/dev/null)" in
+	*/"$bdf"/*) ttys+=("${t##*/}") ;;
+	esac
+done
+if [ ${#ttys[@]} -eq 0 ]; then
+	[ "$drv" = $MOD ] && fail "Driver bound but no ttyS port found"
+else
+	for t in "${ttys[@]}"; do
+		irq=$(cat "/sys/class/tty/$t/irq" 2>/dev/null)
+		if [ "${irq:-0}" = 0 ]; then
+			mode="polled (no MSI vector found)"
+		else
+			mode="MSI, irq $irq"
+		fi
+		say "$ok" "Serial port /dev/$t: $mode"
+	done
+fi
+
+if [ ${#ttys[@]} -gt 0 ]; then
+	t=${ttys[0]}
+	opt=$(grep -oE "(^| )console=${t}(,[^ ]*)?( |\$)" /proc/cmdline | tail -1)
+	if [ -n "$opt" ]; then
+		say "$ok" "Kernel console on $t (${opt// /})"
+	else
+		say "$warn" "No console=$t on the kernel command line (boot messages not on SOL)"
+	fi
+	if systemctl is-active -q "serial-getty@$t.service" 2>/dev/null; then
+		say "$ok" "Login prompt: serial-getty@$t is running"
+	else
+		say "$warn" "serial-getty@$t is not running (no login prompt on SOL)"
+	fi
+	if [ -r /etc/initramfs-tools/modules ] &&
+	   ! grep -q "^$MOD" /etc/initramfs-tools/modules; then
+		say "$warn" "$MOD not in /etc/initramfs-tools/modules (early boot messages are lost)"
+	fi
+fi
+
+if command -v mokutil >/dev/null && mokutil --sb-state 2>/dev/null | grep -q enabled; then
+	key=$(dkms_cert)
+	if [ ! -e "$key" ]; then
+		say "$warn" "Secure Boot is on, and the DKMS signing key ($key) does not exist"
+	elif mokutil --test-key "$key" 2>/dev/null | grep -q "is already enrolled"; then
+		say "$ok" "Secure Boot is on, and the DKMS signing key is enrolled"
+	elif mokutil --list-new 2>/dev/null | grep -q .; then
+		fail "Secure Boot is on; a key is queued for enrollment: reboot and choose 'Enroll MOK'"
+	else
+		fail "Secure Boot is on, but the DKMS key $key is not enrolled (module will be rejected)"
+	fi
+fi
+
+if [ -e /dev/ipmi0 ]; then
+	say "$ok" "KCS: /dev/ipmi0 exists (ipmitool works)"
+elif [ -d /sys/bus/acpi/devices/IPI0001:00 ]; then
+	if lsmod | grep -q '^ipmi_si'; then
+		say "$warn" "KCS: ipmi_si loaded but no /dev/ipmi0; the ACPI KCS address may be stale, see README (BIOS 'OS type', --kcs-fix)"
+	else
+		say "$warn" "KCS: ipmi_si not loaded (modprobe ipmi_si ipmi_devintf)"
+	fi
+fi
+
+echo
+if [ $problems -eq 0 ]; then
+	echo "No problems found."
+else
+	echo "$problems problem(s) found; see the README's Troubleshooting section."
+	exit 1
+fi

@@ -1,0 +1,22 @@
+# Kernel module build output
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+.*.cmd
+*.order
+*.symvers
+.tmp_versions/
+.cache.mk
+
+# Local build test trees and logs
+dev/out/
+*.log
+
+# Editors and OSes
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
