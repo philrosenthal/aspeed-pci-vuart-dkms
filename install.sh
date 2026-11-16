@@ -234,7 +234,7 @@ done
 info "Copying the source to /usr/src/$PKG-$VER"
 rm -rf "/usr/src/$PKG-$VER"
 mkdir -p "/usr/src/$PKG-$VER"
-cp "$HERE"/dkms/{dkms.conf,Makefile,8250_aspeed_pci.c,8250_pcilib.h} "/usr/src/$PKG-$VER/"
+cp "$HERE"/dkms/{dkms.conf,Makefile,8250_aspeed_pci.c,8250_pcilib.h,8250_compat.h} "/usr/src/$PKG-$VER/"
 
 info "Building and installing with DKMS"
 dkms add "$PKG/$VER"

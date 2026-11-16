@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Out-of-tree stand-in for drivers/tty/serial/8250/8250_pcilib.h, which the
- * kernel headers packages do not ship. It also lets 8250_aspeed_pci.c, kept
- * identical to the version proposed upstream, build on older kernels.
+ * kernel headers packages do not ship. It also lets 8250_aspeed_pci.c build on older kernels.
  */
 #ifndef ASPEED_DKMS_8250_PCILIB_H
 #define ASPEED_DKMS_8250_PCILIB_H

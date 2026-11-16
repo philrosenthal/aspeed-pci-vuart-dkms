@@ -29,6 +29,7 @@
 #include <linux/types.h>
 
 #include "8250_pcilib.h"
+#include "8250_compat.h"
 
 #define PCI_DEVICE_ID_ASPEED_BMC_DEV	0x2402
 #define ASPEED_PCI_REV_AST2700		0x27
@@ -54,7 +55,7 @@ struct aspeed_pci8250_irq_test {
 
 struct aspeed_pci8250 {
 	unsigned int nr;
-	int line[ARRAY_SIZE(aspeed_vuart_io)];
+	aspeed_8250_handle ports[ARRAY_SIZE(aspeed_vuart_io)];
 };
 
 static void __iomem *aspeed_vuart_reg(void __iomem *port, unsigned int reg)
@@ -350,13 +351,13 @@ static int aspeed_pci8250_probe(struct pci_dev *pdev,
 			goto err_unregister;
 		uart.port.iotype = UPIO_MEM32;
 
-		ret = serial8250_register_8250_port(&uart);
+		ret = aspeed_8250_register_port(&uart, &priv->ports[priv->nr]);
 		if (ret < 0) {
 			dev_err(dev, "failed to register VUART at %#x: %d\n",
 				offsets[i] >> ASPEED_VUART_REGSHIFT, ret);
 			goto err_unregister;
 		}
-		priv->line[priv->nr++] = ret;
+		priv->nr++;
 	}
 
 	pci_set_drvdata(pdev, priv);
@@ -366,7 +367,7 @@ err_unregister:
 	while (++i < nr)
 		aspeed_vuart_release(pdev, offsets[i]);
 	while (priv->nr)
-		serial8250_unregister_port(priv->line[--priv->nr]);
+		serial8250_unregister_port(priv->ports[--priv->nr]);
 	pci_free_irq_vectors(pdev);
 err_disable:
 	pci_disable_device(pdev);
@@ -379,7 +380,7 @@ static void aspeed_pci8250_remove(struct pci_dev *pdev)
 	unsigned int i;
 
 	for (i = 0; i < priv->nr; i++)
-		serial8250_unregister_port(priv->line[i]);
+		serial8250_unregister_port(priv->ports[i]);
 
 	pci_free_irq_vectors(pdev);
 	pci_disable_device(pdev);
@@ -391,7 +392,7 @@ static int aspeed_pci8250_suspend(struct device *dev)
 	unsigned int i;
 
 	for (i = 0; i < priv->nr; i++)
-		serial8250_suspend_port(priv->line[i]);
+		serial8250_suspend_port(priv->ports[i]);
 
 	return 0;
 }
@@ -402,7 +403,7 @@ static int aspeed_pci8250_resume(struct device *dev)
 	unsigned int i;
 
 	for (i = 0; i < priv->nr; i++)
-		serial8250_resume_port(priv->line[i]);
+		serial8250_resume_port(priv->ports[i]);
 
 	return 0;
 }
