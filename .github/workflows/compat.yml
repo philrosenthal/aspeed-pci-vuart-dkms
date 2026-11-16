@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [v6.8, v6.12, v6.17, v6.19, v7.0]
+        ref: [v6.8, v6.12, v6.17, v6.19, v7.0, v7.3, v7.4-rc1]
     uses: ./.github/workflows/kernel-build.yml
     with:
       ref: ${{ matrix.ref }}
